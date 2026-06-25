@@ -1,0 +1,37 @@
+[package]
+name = "rsomics-pdb-contacts"
+version = "0.1.0"
+edition = "2024"
+description = "Residue/atom contact pairs within a distance cutoff from a PDB, value-exact to Bio.PDB.NeighborSearch.search_all"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/omics-rust/rsomics-pdb-contacts"
+readme = "README.md"
+keywords = ["bioinformatics", "pdb", "contact-map", "neighbor-search", "structure"]
+categories = ["science", "command-line-utilities"]
+
+[[bin]]
+name = "rsomics-pdb-contacts"
+path = "src/main.rs"
+
+[lib]
+name = "rsomics_pdb_contacts"
+path = "src/lib.rs"
+doctest = false
+
+[dependencies]
+rsomics-common = { version = "0.6", features = ["rayon"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+rayon = "1"
+
+[dev-dependencies]
+rsomics-common = { version = "0.6", features = ["rayon", "test-support"] }
+criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
