@@ -9,6 +9,7 @@
 //! conventions layered on top of the same predicate.
 
 use rayon::prelude::*;
+use rsomics_common::Result;
 use serde::Serialize;
 
 use crate::cell_list::{Point, neighbor_pairs};
@@ -94,7 +95,7 @@ pub fn contacts(
     level: Level,
     ca_only: bool,
     min_seq_sep: i32,
-) -> ContactSet {
+) -> Result<ContactSet> {
     let selected = select_atoms(atoms, ca_only);
     let points: Vec<Point> = selected
         .iter()
@@ -105,12 +106,12 @@ pub fn contacts(
         })
         .collect();
 
-    let raw = neighbor_pairs(&points, cutoff);
+    let raw = neighbor_pairs(&points, cutoff)?;
 
-    match level {
+    Ok(match level {
         Level::Atom => ContactSet::Atom(atom_pairs(atoms, &selected, &raw, min_seq_sep)),
         Level::Residue => ContactSet::Residue(residue_pairs(atoms, &selected, &raw, min_seq_sep)),
-    }
+    })
 }
 
 fn atom_pairs(
@@ -245,7 +246,7 @@ mod tests {
             atom('A', 1, "CA", 2, 1.0),
             atom('A', 2, "N", 3, 2.0),
         ];
-        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 0));
+        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 0).unwrap());
         // only residue 1 <-> residue 2; the intra-residue 1-1 pair is dropped
         assert_eq!(pairs.len(), 1);
         assert_eq!((pairs[0].resseq_a, pairs[0].resseq_b), (1, 2));
@@ -254,7 +255,7 @@ mod tests {
     #[test]
     fn atom_level_keeps_intra_residue_pairs() {
         let atoms = vec![atom('A', 1, "N", 1, 0.0), atom('A', 1, "CA", 2, 1.0)];
-        let pairs = atom_pairs_of(contacts(&atoms, 3.0, Level::Atom, false, 0));
+        let pairs = atom_pairs_of(contacts(&atoms, 3.0, Level::Atom, false, 0).unwrap());
         assert_eq!(pairs.len(), 1);
         assert_eq!(
             (pairs[0].atom_a.as_str(), pairs[0].atom_b.as_str()),
@@ -270,7 +271,7 @@ mod tests {
             atom('A', 5, "CA", 3, 2.0),
         ];
         // sep<3 dropped: 1-2 (|1-2|=1) and 2-5? no |2-5|=3 ok ; 1-5 |4| ok
-        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 3));
+        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 3).unwrap());
         let got: Vec<(i32, i32)> = pairs.iter().map(|p| (p.resseq_a, p.resseq_b)).collect();
         assert!(
             !got.contains(&(1, 2)),
@@ -287,7 +288,7 @@ mod tests {
             atom('A', 1, "CB", 2, 0.5),
             atom('A', 2, "CA", 3, 1.0),
         ];
-        let pairs = atom_pairs_of(contacts(&atoms, 3.0, Level::Atom, true, 0));
+        let pairs = atom_pairs_of(contacts(&atoms, 3.0, Level::Atom, true, 0).unwrap());
         // only the two CA atoms remain -> exactly one pair
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].atom_a, "CA");
@@ -297,7 +298,7 @@ mod tests {
     #[test]
     fn pair_order_is_canonical_smaller_residue_first() {
         let atoms = vec![atom('B', 9, "CA", 2, 0.0), atom('A', 1, "CA", 1, 1.0)];
-        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 0));
+        let pairs = res_pairs(contacts(&atoms, 3.0, Level::Residue, false, 0).unwrap());
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].chain_a, 'A');
         assert_eq!(pairs[0].chain_b, 'B');

@@ -14,10 +14,10 @@ fn load() -> Vec<pdb::Atom> {
 fn bench(c: &mut Criterion) {
     let atoms = load();
     c.bench_function("residue_8.0", |b| {
-        b.iter(|| contacts(black_box(&atoms), 8.0, Level::Residue, false, 0));
+        b.iter(|| contacts(black_box(&atoms), 8.0, Level::Residue, false, 0).unwrap());
     });
     c.bench_function("atom_8.0", |b| {
-        b.iter(|| contacts(black_box(&atoms), 8.0, Level::Atom, false, 0));
+        b.iter(|| contacts(black_box(&atoms), 8.0, Level::Atom, false, 0).unwrap());
     });
 }
 

@@ -37,20 +37,24 @@ fn run_ours(args: &[&str]) -> String {
 }
 
 struct Case {
+    pdb: &'static str,
     golden: &'static str,
     args: &'static [&'static str],
 }
 
 const CASES: &[Case] = &[
     Case {
+        pdb: "tests/golden/1crn.pdb",
         golden: "tests/golden/1crn.residue_8.0.tsv",
         args: &["--cutoff", "8.0", "--level", "residue"],
     },
     Case {
+        pdb: "tests/golden/1crn.pdb",
         golden: "tests/golden/1crn.atom_4.0.tsv",
         args: &["--cutoff", "4.0", "--level", "atom"],
     },
     Case {
+        pdb: "tests/golden/1crn.pdb",
         golden: "tests/golden/1crn.residue_ca_8.0_sep2.tsv",
         args: &[
             "--cutoff",
@@ -62,6 +66,7 @@ const CASES: &[Case] = &[
         ],
     },
     Case {
+        pdb: "tests/golden/1crn.pdb",
         golden: "tests/golden/1crn.atom_ca_boundary.tsv",
         args: &[
             "--cutoff",
@@ -71,13 +76,21 @@ const CASES: &[Case] = &[
             "--ca-only",
         ],
     },
+    // Disordered atom: residue 1's CA has altloc A (occ 0.40, far) and B (occ
+    // 0.60, near). biopython selects the higher-occupancy B, so it contacts
+    // residues 2 and 3; the old first-seen-A parser saw none of those pairs.
+    Case {
+        pdb: "tests/golden/altloc.pdb",
+        golden: "tests/golden/altloc.atom_ca_3.0.tsv",
+        args: &["--cutoff", "3.0", "--level", "atom", "--ca-only"],
+    },
 ];
 
 #[test]
 fn golden_pairs_match_biopython() {
-    let pdb = manifest("tests/golden/1crn.pdb");
-    let pdb = pdb.to_str().unwrap();
     for case in CASES {
+        let pdb = manifest(case.pdb);
+        let pdb = pdb.to_str().unwrap();
         let mut args: Vec<&str> = vec![pdb];
         args.extend_from_slice(case.args);
         let ours = run_ours(&args);
@@ -87,6 +100,51 @@ fn golden_pairs_match_biopython() {
             "contact-pair set/order mismatch for {:?}",
             case.args
         );
+    }
+}
+
+/// Non-positive cutoffs must fail loudly the way biopython's
+/// NeighborSearch.search_all raises `ValueError: Radius must be positive.`
+#[test]
+fn nonpositive_cutoff_errors_loud() {
+    let pdb = manifest("tests/golden/1crn.pdb");
+    let pdb = pdb.to_str().unwrap();
+    for bad in ["0", "0.0", "-1", "-2.5"] {
+        // `=` form so clap does not read a leading-minus value as a flag
+        let cutoff = format!("--cutoff={bad}");
+        let out = Command::new(bin())
+            .args([pdb, &cutoff, "--level", "atom"])
+            .output()
+            .expect("spawn binary");
+        assert!(
+            !out.status.success(),
+            "cutoff {bad} must exit non-zero, not silently proceed"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("radius must be positive"),
+            "cutoff {bad} stderr should name the positive-radius rule, got: {stderr}"
+        );
+    }
+}
+
+/// A valid but tiny cutoff explodes a naive uniform grid; the fallback must
+/// return biopython's result (0 pairs on 1crn) without OOM/abort.
+#[test]
+fn tiny_cutoff_returns_empty_fast() {
+    let pdb = manifest("tests/golden/1crn.pdb");
+    let pdb = pdb.to_str().unwrap();
+    for cut in ["0.001", "0.01", "0.02"] {
+        for level in ["atom", "residue"] {
+            let ours = run_ours(&[pdb, "--cutoff", cut, "--level", level]);
+            let header = ours.lines().next().unwrap_or("");
+            assert_eq!(
+                ours.lines().count(),
+                1,
+                "cutoff {cut} level {level} must yield header only (0 pairs), got:\n{ours}"
+            );
+            assert!(header.starts_with("chainA"), "header preserved");
+        }
     }
 }
 
@@ -121,8 +179,8 @@ fn live_oracle_biopython() {
         return;
     };
     let oracle = manifest("tests/contacts_oracle.py");
-    let pdb = manifest("tests/golden/1crn.pdb");
     for case in CASES {
+        let pdb = manifest(case.pdb);
         let mut oargs: Vec<String> = vec![
             oracle.to_string_lossy().into_owned(),
             pdb.to_string_lossy().into_owned(),

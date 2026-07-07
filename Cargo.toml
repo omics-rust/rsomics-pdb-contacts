@@ -1,6 +1,6 @@
 [package]
 name = "rsomics-pdb-contacts"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Residue/atom contact pairs within a distance cutoff from a PDB, value-exact to Bio.PDB.NeighborSearch.search_all"
 license = "MIT OR Apache-2.0"

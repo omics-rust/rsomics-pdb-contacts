@@ -82,7 +82,7 @@ impl Cli {
             self.level(),
             self.ca_only,
             self.min_seq_sep,
-        );
+        )?;
 
         if !self.common.json {
             let stdout = io::stdout();

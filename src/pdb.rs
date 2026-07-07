@@ -1,6 +1,8 @@
 //! Fixed-column PDB ATOM parser producing the same atom universe biopython's
-//! PDBParser hands to NeighborSearch: first model, first altloc per residue,
-//! standard amino-acid residues, hydrogens dropped.
+//! PDBParser hands to NeighborSearch: first model, highest-occupancy alternate
+//! per disordered atom, standard amino-acid residues, hydrogens dropped.
+
+use std::collections::HashMap;
 
 use rsomics_common::Result;
 use rsomics_common::error::RsomicsError;
@@ -54,43 +56,38 @@ fn is_hydrogen(line: &[u8], atom_name: &str) -> bool {
     matches!(first, Some('H') | Some('D'))
 }
 
-/// Resolve altlocs the way biopython's default PDBParser does: the first altloc
-/// character seen for a residue's atom wins; later differing altlocs of the same
-/// atom are discarded.
-struct AltlocFilter {
-    last_res: Option<(char, i32, char)>,
-    seen: Vec<(String, char)>,
+/// Occupancy (columns 55-60) picks the representative of a disordered atom.
+/// biopython stores it as a plain float, so it is compared in f64 here — only
+/// the strict `>` at tie boundaries is sensitive to the precision.
+fn occupancy(line: &str, len: usize) -> Result<f64> {
+    if len < 60 {
+        return Ok(1.0);
+    }
+    let field = line[54..60].trim();
+    if field.is_empty() {
+        return Ok(1.0);
+    }
+    Ok(field.parse()?)
 }
 
-impl AltlocFilter {
-    fn new() -> Self {
-        Self {
-            last_res: None,
-            seen: Vec::new(),
-        }
-    }
-
-    fn accept(&mut self, key: (char, i32, char), atom_name: &str, altloc: char) -> bool {
-        if self.last_res != Some(key) {
-            self.last_res = Some(key);
-            self.seen.clear();
-        }
-        if altloc == ' ' {
-            return true;
-        }
-        if let Some((_, kept)) = self.seen.iter().find(|(n, _)| n == atom_name) {
-            return *kept == altloc;
-        }
-        self.seen.push((atom_name.to_string(), altloc));
-        true
-    }
+struct Selected {
+    atom: Atom,
+    occupancy: f64,
 }
 
 /// Parse the first model into the flat atom list NeighborSearch operates on.
+///
+/// Alternate locations collapse the way biopython's `DisorderedAtom` does:
+/// atoms are grouped by (chain, residue, atom name) and the alternate with the
+/// highest occupancy represents the group, regardless of its altloc label. A
+/// strict occupancy tie keeps the first-encountered alternate, matching
+/// biopython's `disordered_select` default. Each group holds the file position
+/// of its first alternate, so the flat list order is unchanged for structures
+/// without altlocs.
 pub fn parse(text: &str) -> Result<Vec<Atom>> {
-    let mut atoms = Vec::new();
+    let mut groups: Vec<Selected> = Vec::new();
+    let mut index: HashMap<(char, i32, char, String), usize> = HashMap::new();
     let mut seen_model = false;
-    let mut altloc = AltlocFilter::new();
 
     for line in text.lines() {
         let bytes = line.as_bytes();
@@ -125,17 +122,15 @@ pub fn parse(text: &str) -> Result<Vec<Atom>> {
         let chain = bytes[21] as char;
         let resseq: i32 = line[22..26].trim().parse()?;
         let icode = bytes[26] as char;
-        let alt = bytes[16] as char;
-        if !altloc.accept((chain, resseq, icode), &atom_name, alt) {
-            continue;
-        }
 
         let serial: i64 = line[6..11].trim().parse()?;
         let x = coord(&line[30..38])?;
         let y = coord(&line[38..46])?;
         let z = coord(&line[46..54])?;
+        let occ = occupancy(line, bytes.len())?;
 
-        atoms.push(Atom {
+        let key = (chain, resseq, icode, atom_name.clone());
+        let atom = Atom {
             chain,
             resseq,
             icode,
@@ -145,10 +140,26 @@ pub fn parse(text: &str) -> Result<Vec<Atom>> {
             x,
             y,
             z,
-        });
+        };
+        match index.get(&key) {
+            None => {
+                index.insert(key, groups.len());
+                groups.push(Selected {
+                    atom,
+                    occupancy: occ,
+                });
+            }
+            Some(&gi) if occ > groups[gi].occupancy => {
+                groups[gi] = Selected {
+                    atom,
+                    occupancy: occ,
+                };
+            }
+            Some(_) => {}
+        }
     }
 
-    Ok(atoms)
+    Ok(groups.into_iter().map(|g| g.atom).collect())
 }
 
 #[cfg(test)]
@@ -171,10 +182,11 @@ ATOM      6  CB BALA B   2       9.000   9.000   9.000  0.50  0.00           C
         assert_eq!(
             names,
             vec!["N", "CA", "CB"],
-            "H, HOH dropped; first altloc CB kept"
+            "H, HOH dropped; disordered CB collapsed to one"
         );
         assert_eq!(atoms[2].chain, 'B');
-        assert_eq!(atoms[2].x, 1.0, "altloc A coordinates win");
+        // occupancy tie (0.50 == 0.50) keeps the first-seen alternate 'A'
+        assert_eq!(atoms[2].x, 1.0, "tie keeps first-seen alternate");
     }
 
     #[test]
@@ -182,5 +194,35 @@ ATOM      6  CB BALA B   2       9.000   9.000   9.000  0.50  0.00           C
         let atoms = parse(SAMPLE).unwrap();
         // 16.967 has no exact f64 form; biopython sees its f32 rounding
         assert_eq!(atoms[1].x, f64::from(16.967_f32));
+    }
+
+    #[test]
+    fn highest_occupancy_alternate_wins() {
+        // altloc A (occ 0.40) seen first, altloc B (occ 0.60) — biopython selects B
+        let text = "\
+ATOM      1  CA AALA A   1       0.000   0.000   0.000  0.40  0.00           C
+ATOM      2  CA BALA A   1      10.000   0.000   0.000  0.60  0.00           C
+";
+        let atoms = parse(text).unwrap();
+        assert_eq!(atoms.len(), 1, "the two alternates collapse to one");
+        assert_eq!(atoms[0].x, 10.0, "highest-occupancy alternate B wins");
+        assert_eq!(atoms[0].serial, 2, "selected serial is the B alternate's");
+    }
+
+    #[test]
+    fn non_a_only_alternate_is_kept() {
+        // an atom whose sole label is a non-'A' alternate must not be dropped
+        let text = "\
+ATOM      1  CA BALA A   1       5.000   0.000   0.000  1.00  0.00           C
+ATOM      2  CB cALA A   1       6.000   0.000   0.000  1.00  0.00           C
+ATOM      3  CG 2ALA A   1       7.000   0.000   0.000  1.00  0.00           C
+";
+        let atoms = parse(text).unwrap();
+        let names: Vec<_> = atoms.iter().map(|a| a.atom_name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["CA", "CB", "CG"],
+            "B-only, lowercase, and numeric alternates are all kept"
+        );
     }
 }
