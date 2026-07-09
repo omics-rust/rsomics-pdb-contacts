@@ -400,13 +400,23 @@ dependencies = [
 
 [[package]]
 name = "rsomics-pdb-contacts"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "clap",
  "criterion",
  "rayon",
  "rsomics-common",
+ "rsomics-pdb-core",
  "serde",
+]
+
+[[package]]
+name = "rsomics-pdb-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56db9aa53ad092ff1322452c05e0c40d855c08fa8ffcac5b3fc02e00a61cfff6"
+dependencies = [
+ "rsomics-common",
 ]
 
 [[package]]

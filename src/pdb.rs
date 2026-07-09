@@ -1,11 +1,10 @@
-//! Fixed-column PDB ATOM parser producing the same atom universe biopython's
-//! PDBParser hands to NeighborSearch: first model, highest-occupancy alternate
-//! per disordered atom, standard amino-acid residues, hydrogens dropped.
-
-use std::collections::HashMap;
+//! Atom universe biopython's PDBParser hands to NeighborSearch, sourced from
+//! the shared `rsomics-pdb-core` parser: first model, highest-occupancy
+//! alternate per disordered atom, standard amino-acid residues, hydrogens
+//! dropped.
 
 use rsomics_common::Result;
-use rsomics_common::error::RsomicsError;
+use rsomics_pdb_core::{AltLocPolicy, ParseOptions, ResidueFilter, select_altloc};
 
 pub struct Atom {
     pub chain: char,
@@ -19,147 +18,40 @@ pub struct Atom {
     pub z: f64,
 }
 
-const STANDARD_AA: &[&str] = &[
-    "ALA", "ARG", "ASN", "ASP", "CYS", "GLN", "GLU", "GLY", "HIS", "ILE", "LEU", "LYS", "MET",
-    "PHE", "PRO", "SER", "THR", "TRP", "TYR", "VAL",
-];
-
-fn is_standard_aa(resname: &str) -> bool {
-    STANDARD_AA.contains(&resname)
-}
-
+/// Parse the first model into the flat atom list NeighborSearch operates on:
+/// standard amino acids only, hydrogens and HETATM dropped, and the
+/// highest-occupancy alternate representing each disordered atom (ties keep the
+/// first-seen alternate).
+///
 /// biopython's PDBParser stores coordinates as 32-bit floats and only widens
 /// them to f64 inside NeighborSearch's KDTree. Matching that f32 rounding is
 /// what makes the inclusive `distance <= cutoff` boundary bit-exact against the
-/// oracle, so coordinates are parsed through f32 here.
-fn coord(field: &str) -> Result<f64> {
-    let v: f32 = field.trim().parse()?;
-    Ok(f64::from(v))
-}
-
-/// Element column 76-77 first, then the atom-name column fallback — mirrors how
-/// biopython tags hydrogens (Atom.element, falling back to the name's leading
-/// non-digit character).
-fn is_hydrogen(line: &[u8], atom_name: &str) -> bool {
-    let element = if line.len() >= 78 {
-        std::str::from_utf8(&line[76..78])
-            .unwrap_or("")
-            .trim()
-            .to_string()
-    } else {
-        String::new()
-    };
-    if !element.is_empty() {
-        return element == "H" || element == "D";
-    }
-    let first = atom_name.chars().find(|c| !c.is_ascii_digit());
-    matches!(first, Some('H') | Some('D'))
-}
-
-/// Occupancy (columns 55-60) picks the representative of a disordered atom.
-/// biopython stores it as a plain float, so it is compared in f64 here — only
-/// the strict `>` at tie boundaries is sensitive to the precision.
-fn occupancy(line: &str, len: usize) -> Result<f64> {
-    if len < 60 {
-        return Ok(1.0);
-    }
-    let field = line[54..60].trim();
-    if field.is_empty() {
-        return Ok(1.0);
-    }
-    Ok(field.parse()?)
-}
-
-struct Selected {
-    atom: Atom,
-    occupancy: f64,
-}
-
-/// Parse the first model into the flat atom list NeighborSearch operates on.
-///
-/// Alternate locations collapse the way biopython's `DisorderedAtom` does:
-/// atoms are grouped by (chain, residue, atom name) and the alternate with the
-/// highest occupancy represents the group, regardless of its altloc label. A
-/// strict occupancy tie keeps the first-encountered alternate, matching
-/// biopython's `disordered_select` default. Each group holds the file position
-/// of its first alternate, so the flat list order is unchanged for structures
-/// without altlocs.
+/// oracle, so coordinates are rounded through f32 here.
 pub fn parse(text: &str) -> Result<Vec<Atom>> {
-    let mut groups: Vec<Selected> = Vec::new();
-    let mut index: HashMap<(char, i32, char, String), usize> = HashMap::new();
-    let mut seen_model = false;
+    let opts = ParseOptions {
+        include_hetatm: false,
+        include_hydrogen: false,
+        residue_filter: ResidueFilter::Standard20,
+    };
+    let atoms = select_altloc(
+        rsomics_pdb_core::parse(text, &opts)?,
+        AltLocPolicy::HighestOccupancy,
+    );
 
-    for line in text.lines() {
-        let bytes = line.as_bytes();
-        if line.starts_with("ENDMDL") {
-            break;
-        }
-        if line.starts_with("MODEL") {
-            if seen_model {
-                break;
-            }
-            seen_model = true;
-            continue;
-        }
-        if !line.starts_with("ATOM") {
-            continue;
-        }
-        if bytes.len() < 54 {
-            return Err(RsomicsError::InvalidInput(format!(
-                "truncated ATOM record: {line}"
-            )));
-        }
-
-        let resname = line[17..20].trim().to_string();
-        if !is_standard_aa(&resname) {
-            continue;
-        }
-        let atom_name = line[12..16].trim().to_string();
-        if is_hydrogen(bytes, &atom_name) {
-            continue;
-        }
-
-        let chain = bytes[21] as char;
-        let resseq: i32 = line[22..26].trim().parse()?;
-        let icode = bytes[26] as char;
-
-        let serial: i64 = line[6..11].trim().parse()?;
-        let x = coord(&line[30..38])?;
-        let y = coord(&line[38..46])?;
-        let z = coord(&line[46..54])?;
-        let occ = occupancy(line, bytes.len())?;
-
-        let key = (chain, resseq, icode, atom_name.clone());
-        let atom = Atom {
-            chain,
-            resseq,
-            icode,
-            resname,
-            atom_name,
-            serial,
-            x,
-            y,
-            z,
-        };
-        match index.get(&key) {
-            None => {
-                index.insert(key, groups.len());
-                groups.push(Selected {
-                    atom,
-                    occupancy: occ,
-                });
-            }
-            Some(&gi) if occ > groups[gi].occupancy => {
-                groups[gi] = Selected {
-                    atom,
-                    occupancy: occ,
-                };
-            }
-            Some(_) => {}
-        }
-    }
-
-    Ok(groups.into_iter().map(|g| g.atom).collect())
+    Ok(atoms
+        .into_iter()
+        .map(|a| Atom {
+            chain: a.chain,
+            resseq: a.resseq,
+            icode: a.icode,
+            resname: a.resname,
+            atom_name: a.name,
+            serial: a.serial,
+            x: f64::from(a.coord[0] as f32),
+            y: f64::from(a.coord[1] as f32),
+            z: f64::from(a.coord[2] as f32),
+        })
+        .collect())
 }
 
 #[cfg(test)]
